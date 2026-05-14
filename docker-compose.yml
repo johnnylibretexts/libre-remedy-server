@@ -1,0 +1,69 @@
+services:
+  remedy-server:
+    build:
+      context: .
+      target: runtime          # swap to runtime-slim if you don't need HTML endpoints
+    image: remedy-server:latest
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 2m
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      APP_DOCS_ENABLED: "false"
+      APP_API_KEY: ${APP_API_KEY:?Set APP_API_KEY in .env}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:?Set OLLAMA_API_KEY in .env}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-kimi-k2.6:cloud}
+      OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-kimi-k2.6:cloud}
+      OLLAMA_ESCALATION_MODEL: ${OLLAMA_ESCALATION_MODEL:-kimi-k2.6:cloud}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:?Set CORS_ALLOW_ORIGINS in .env}
+      JOB_DIR: /app/job_data
+      JOB_STORE_PATH: /app/state/jobs.db
+      JOB_BACKUP_DIR: /app/state/job_backups
+      OUTPUT_DIR: /app/state/output
+      LOG_DIR: /app/state/logs
+      LOG_FORMAT: json
+    volumes:
+      - job_data:/app/job_data
+      - job_state:/app/state
+    expose:
+      - "8000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Uncomment to publish on the host directly (bypassing Caddy):
+    # ports:
+    #   - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      remedy-server:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"          # HTTP/3
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+      CADDY_GLOBAL_OPTIONS: ${CADDY_GLOBAL_OPTIONS:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  job_data:
+  job_state:                   # SQLite, backups, and engine output artefacts
+  caddy_data:
+  caddy_config:

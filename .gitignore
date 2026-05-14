@@ -1,0 +1,114 @@
+# Sensitive / credentials
+.env
+*.env
+.env.*
+!.env.example
+service-account*.json
+firebase-service-account*.json
+credentials*.json
+client_secret*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+.npmrc
+.yarnrc
+
+# Data directories (large, contain student docs)
+exports/
+output/
+tmp/
+# Local compliance/check artifacts produced by ad-hoc CLI runs
+compliance/
+
+# Test suite (local-only per repo policy)
+tests/
+
+# Local-only project notes / per-developer scratch files
+CLAUDE.md
+BUILD_LOG.md
+v2_docs/
+excalidraw.log
+.claude/
+
+# Database
+pipeline.db
+*.db
+*.db-shm
+*.db-wal
+
+# API backend runtime artifacts
+job_data/
+
+# Logs
+logs/
+*.log
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Research docs and references (not needed for app to run)
+docs/*
+!docs/superpowers/
+
+# OneDrive artifacts
+~$*
+*.tmp
+
+# .NET sidecar build artifacts
+sidecar/**/bin/
+sidecar/**/obj/
+
+# Agent/tool local state
+entities.json
+mempalace.yaml
+openmemory.md
+.claude/
+.cursor/
+.playwright-mcp/
+.firecrawl/
+
+# Clean seed repo exclusions
+*.md
+!src/project_remedy/behavioral_proxies/**/prompts/
+!src/project_remedy/behavioral_proxies/**/prompts/*.md
+!src/project_remedy/quality_judges/**/prompts/
+!src/project_remedy/quality_judges/**/prompts/*.md
+docs/
+doc/
+knowledge-base/
+knowledge_base/
+*knowledge-base*/
+tests/
+test/
+__tests__/
+test_*.py
+*_test.py
+*.test.*
+*.spec.*
+!README.md
+!src/**/*.py
+!backend/**/*.py
+!tools/**/*.py
+
+# Screenshots / demo recordings — not part of source
+screenshots/
