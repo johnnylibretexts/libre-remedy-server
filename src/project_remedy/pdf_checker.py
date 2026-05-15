@@ -371,9 +371,16 @@ def _find_suspicious_extracted_text(text: str) -> list[str]:
         "go", "he", "if", "in", "is", "it", "may", "of", "on", "or", "our",
         "pay", "so", "the", "to", "up", "us", "we", "www",
     }
+    # Justified-paragraph PDFs naturally yield a handful of (short, long)
+    # word pairs separated by 2+ spaces in extracted text — that's layout
+    # spacing, not unreliable character encoding. Require many such patterns
+    # on the same page before flagging this as a suspicious finding. Adobe's
+    # AAC "Reliable character encoding" rule is about ToUnicode CMaps and
+    # glyph-to-character mapping, not extraction whitespace.
     split_word_pattern = re.compile(
         r"\b([A-Za-z]{1,3}) {2,}([A-Za-z]{4,16})\b|\b([A-Za-z]{4,16}) {2,}([A-Za-z]{1,3})\b"
     )
+    split_hits = 0
     for match in split_word_pattern.finditer(text):
         left = (match.group(1) or match.group(3) or "").lower()
         right = (match.group(2) or match.group(4) or "").lower()
@@ -381,8 +388,9 @@ def _find_suspicious_extracted_text(text: str) -> list[str]:
         if short_fragment in common_short_words:
             continue
         if len(left + right) >= 7:
-            findings.append("words are split by repeated spaces")
-            break
+            split_hits += 1
+    if split_hits >= 12:
+        findings.append("words are split by repeated spaces")
     return findings
 
 
@@ -1615,6 +1623,15 @@ class PDFAccessibilityChecker:
                             if min(rgb) >= 245 and (width <= 12.0 or height <= 16.0):
                                 continue
                             background_lum = 1.0
+                        # Pure-black (or near-black) text over a measured-dark
+                        # background almost always indicates text overlapping
+                        # a photograph — Adobe AAC labels this "needs manual
+                        # check", not Failed, because contrast can't be
+                        # automatically corrected without redesigning the
+                        # page. Skip these so the rule reflects real
+                        # remediable failures.
+                        if max(rgb) <= 32 and background_lum < 0.4:
+                            continue
                         contrast = self._contrast_ratio(text_lum, background_lum)
                         threshold = 3.0
                         if contrast < threshold:
