@@ -85,13 +85,38 @@ def node_has_struct_children(node: pikepdf.Dictionary) -> bool:
 
 
 def node_has_annotation_ref(node: pikepdf.Dictionary) -> bool:
-    """True when the node references an annotation through OBJR or /Obj."""
+    """True when the node references an actual annotation through OBJR or /Obj.
+
+    PDF/UA-1 §7.18 ``alt-hides-annotation`` flags struct elements that own
+    an annotation reference *and* an /Alt that would hide that annotation's
+    own contents. The rule must not trip on /OBJR references that point to
+    a non-annotation indirect object (e.g. an image XObject used to give a
+    /Figure proper content association). Verify the resolved /Obj actually
+    is an annotation before reporting True.
+    """
     for child in iter_resolved_kids(node):
         if not isinstance(child, pikepdf.Dictionary):
             continue
         obj_type = str(child.get("/Type", ""))
-        if obj_type == "/OBJR" or child.get("/Obj") is not None:
+        if obj_type != "/OBJR" and child.get("/Obj") is None:
+            continue
+        target = child.get("/Obj")
+        if target is None:
+            # /OBJR without /Obj is malformed; treat as annotation-ish by
+            # legacy default so we don't lose existing detections.
             return True
+        try:
+            resolved = target.get_object() if hasattr(target, "get_object") else target
+        except Exception:
+            return True
+        if not isinstance(resolved, pikepdf.Dictionary):
+            continue
+        target_type = str(resolved.get("/Type", ""))
+        target_subtype = str(resolved.get("/Subtype", ""))
+        # XObjects (Image, Form) are not annotations.
+        if target_type == "/XObject" or target_subtype in {"/Image", "/Form"}:
+            continue
+        return True
     return False
 
 

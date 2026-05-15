@@ -5524,12 +5524,22 @@ def fix_substantive_artifact_images(
                 text_only += 1
                 continue
             page = pdf.pages[page_idx]
+            # /OBJR linking the figure to the image XObject gives the new
+            # /Figure proper content association (PDF/UA-1 alt-associated)
+            # without an MCID — the existing /Artifact scope keeps its own
+            # marked-content role for the page-image layer.
+            objr = pikepdf.Dictionary({
+                "/Type": pikepdf.Name("/OBJR"),
+                "/Pg": page.obj,
+                "/Obj": xo,
+            })
             figure = pikepdf.Dictionary({
                 "/Type": pikepdf.Name("/StructElem"),
                 "/S": pikepdf.Name("/Figure"),
                 "/Pg": page.obj,
                 "/Alt": pikepdf.String(text[:300]),
                 "/P": struct_root,
+                "/K": pikepdf.Array([objr]),
             })
             new_kid = pdf.make_indirect(figure)
             root_kids = [new_kid] + root_kids
