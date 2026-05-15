@@ -5364,6 +5364,42 @@ def fix_image_struct_elems_retag(pdf: pikepdf.Pdf) -> list[str]:
             # downstream alt-text generation (fix_figures_alt_text) drives
             # the accessible name unambiguously.
             del node["/ActualText"]
+        # Remove non-image MCIDs from /K. Producers sometimes lump a stray
+        # /Span (a single drop-cap letter, a caption fragment) into the same
+        # /P that wraps the image; after retagging to /Figure that extra
+        # marked-content reference makes Adobe Acrobat show the text content
+        # instead of the alt-text on hover. PDF/UA-1 also disallows mixing
+        # text content into /Figure. Keep only MCIDs that reference an
+        # image Do.
+        existing_k = node.get("/K")
+        if existing_k is not None:
+            existing_items = (
+                list(existing_k) if isinstance(existing_k, pikepdf.Array)
+                else [existing_k]
+            )
+            filtered = []
+            for item in existing_items:
+                if isinstance(item, pikepdf.Dictionary):
+                    if item.get("/Type") == pikepdf.Name("/MCR"):
+                        try:
+                            m = int(item.get("/MCID", -1))
+                        except Exception:
+                            m = -1
+                        if m in xobj_map:
+                            filtered.append(item)
+                        # else drop — non-image MCR
+                    else:
+                        filtered.append(item)
+                else:
+                    try:
+                        if int(item) in xobj_map:
+                            filtered.append(item)
+                    except Exception:
+                        filtered.append(item)
+            if filtered and len(filtered) < len(existing_items):
+                node["/K"] = (
+                    pikepdf.Array(filtered) if len(filtered) > 1 else filtered[0]
+                )
         retagged += 1
 
     if retagged:
