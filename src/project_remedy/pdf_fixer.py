@@ -5472,6 +5472,189 @@ def _find_full_page_artifact_image_xobjects(
     return found
 
 
+def _find_image_xobjects_recursive(
+    resources, _depth: int = 0, _seen: set | None = None,
+) -> list[pikepdf.Object]:
+    """Yield every Image XObject reachable from ``resources``, including
+    those nested inside Form XObjects (up to 3 levels deep)."""
+    if _depth > 3:
+        return []
+    if _seen is None:
+        _seen = set()
+    out: list[pikepdf.Object] = []
+    try:
+        xobjs = resources.XObject
+    except Exception:
+        return out
+    for _name, xo in xobjs.items():
+        try:
+            key = xo.objgen
+        except Exception:
+            key = None
+        if key in _seen:
+            continue
+        if key is not None:
+            _seen.add(key)
+        sub = xo.get("/Subtype")
+        if sub == pikepdf.Name("/Image"):
+            out.append(xo)
+        elif sub == pikepdf.Name("/Form"):
+            inner = xo.get("/Resources")
+            if inner:
+                out.extend(_find_image_xobjects_recursive(inner, _depth + 1, _seen))
+    return out
+
+
+def _page_already_has_figure_for_image(
+    pdf: pikepdf.Pdf, page_idx: int, image_objgen,
+) -> bool:
+    """Does any /Figure on this page already reference this image?
+
+    Looks for /OBJR /Obj pointing to the image XObject. (MCID-based linkage
+    is harder to verify here since it would require resolving content
+    streams; we trust upstream fixes for the MCID case.)
+    """
+    for n, _depth, _parent in walk_structure_tree(pdf):
+        if _get_struct_type(n) != "Figure":
+            continue
+        if _find_node_page(n, pdf) != page_idx:
+            continue
+        k = n.get("/K")
+        if k is None:
+            continue
+        items = list(k) if isinstance(k, pikepdf.Array) else [k]
+        for it in items:
+            if isinstance(it, pikepdf.Dictionary):
+                obj = it.get("/Obj")
+                if obj is not None:
+                    try:
+                        if obj.objgen == image_objgen:
+                            return True
+                    except Exception:
+                        continue
+    return False
+
+
+def fix_orphan_image_xobjects(
+    pdf: pikepdf.Pdf, *, vision_provider=None,
+) -> list[str]:
+    """Add /Figure + vision /Alt for Image XObjects that no /Figure references.
+
+    Some producers wrap photographs inside Form XObjects called from a /Span
+    or /Artifact scope on the page. The image is then invisible to the
+    structure tree — Adobe Acrobat shows no alt-text on hover and screen
+    readers silently skip the photograph. This fix walks each page's
+    resource tree (including Form XObjects), and for any Image XObject
+    that isn't already referenced by a /Figure on the page, renders the
+    page and asks the vision model to describe the photograph. Inserts a
+    new /Figure struct elem at the root with /Pg + /OBJR linking back to
+    the image XObject.
+
+    No-op without a vision provider.
+    """
+    if vision_provider is None:
+        return []
+
+    struct_root = pdf.Root.get("/StructTreeRoot")
+    if struct_root is None:
+        return []
+
+    # Find (page_idx, image_xo) pairs for images that lack a /Figure cover.
+    targets: list[tuple[int, pikepdf.Object]] = []
+    for page_idx, page in enumerate(pdf.pages):
+        seen_on_page: set = set()
+        for xo in _find_image_xobjects_recursive(page.Resources):
+            try:
+                key = xo.objgen
+            except Exception:
+                continue
+            if key in seen_on_page:
+                continue
+            seen_on_page.add(key)
+            if _page_already_has_figure_for_image(pdf, page_idx, key):
+                continue
+            targets.append((page_idx, xo))
+
+    if not targets:
+        return []
+
+    from project_remedy.pdf_vision import render_page_to_image
+
+    prompt = (
+        "This is a full page from a scanned academic book chapter. "
+        "Identify and describe the photograph or visual figure on this page "
+        "(subjects, setting, action, period). Do not describe the body text. "
+        "If the page is purely typeset text with no figure, respond with "
+        "'TEXT_ONLY_PAGE'. 2-3 sentences."
+    )
+
+    # Render each unique page once; reuse description across multiple images
+    # on that page (typical when the producer slices a single photo into
+    # several internal XObjects).
+    pdf_path = Path(getattr(pdf, "filename", "") or "")
+    if not pdf_path.exists():
+        return []
+
+    page_descs: dict[int, str] = {}
+    pages_needed = sorted({pi for pi, _ in targets})
+    for pi in pages_needed:
+        try:
+            img = render_page_to_image(pdf_path, pi + 1)
+        except Exception:
+            continue
+        if img is None:
+            continue
+        try:
+            desc = _run_async_callable_blocking(
+                vision_provider.analyze_image, Path(img), prompt,
+            )
+        except Exception:
+            desc = ""
+        try:
+            Path(img).unlink(missing_ok=True)
+        except Exception:
+            pass
+        page_descs[pi] = str(desc).strip().strip('"').strip("'").strip()
+
+    root_k = struct_root.get("/K")
+    root_kids = list(root_k) if isinstance(root_k, pikepdf.Array) else (
+        [root_k] if root_k else []
+    )
+
+    added = 0
+    skipped_text = 0
+    for page_idx, xo in targets:
+        desc = page_descs.get(page_idx, "")
+        if not desc or desc.upper().startswith("TEXT_ONLY_PAGE"):
+            skipped_text += 1
+            continue
+        page = pdf.pages[page_idx]
+        objr = pikepdf.Dictionary({
+            "/Type": pikepdf.Name("/OBJR"),
+            "/Pg": page.obj,
+            "/Obj": xo,
+        })
+        figure = pikepdf.Dictionary({
+            "/Type": pikepdf.Name("/StructElem"),
+            "/S": pikepdf.Name("/Figure"),
+            "/Pg": page.obj,
+            "/Alt": pikepdf.String(desc[:300]),
+            "/P": struct_root,
+            "/K": pikepdf.Array([objr]),
+        })
+        new_kid = pdf.make_indirect(figure)
+        root_kids = [new_kid] + root_kids
+        struct_root["/K"] = pikepdf.Array(root_kids)
+        added += 1
+
+    parts = []
+    if added:
+        parts.append(f"Added /Figure for {added} orphan image XObject(s) with vision alt-text")
+    if skipped_text:
+        parts.append(f"Skipped {skipped_text} image XObject(s) on text-only pages")
+    return parts
+
+
 def _read_page_content_stream_bytes(page) -> bytes | None:
     """Return the concatenated raw bytes of the page's /Contents."""
     try:
@@ -16122,6 +16305,7 @@ _VISION_FIX_IDS = {
     "page-multimedia-tagged", "page-no-repetitive-links", "tables-regularity",
     "tables-summary", "alt-figures-quality", "headings-hierarchy-quality",
     "alt-artifact-promote",
+    "alt-orphan-images",
 }
 
 _LARGE_DOC_DEFER_FIX_IDS = {
@@ -16212,6 +16396,7 @@ ALL_FIXES: list[tuple[str, callable, str]] = [
     ("toc-structure", fix_toc_structure, "TOC structure (TOC/TOCI/Caption)"),
     ("alt-image-struct-retag", fix_image_struct_elems_retag, "Image-only struct elements use /Figure role"),
     ("alt-artifact-promote", fix_substantive_artifact_images, "Promote /Artifact-wrapped substantive images to /Figure"),
+    ("alt-orphan-images", fix_orphan_image_xobjects, "Add /Figure for image XObjects with no struct reference"),
     ("alt-figures", fix_figures_alt_text, "Figures require alternate text"),
     ("alt-figures-quality", fix_figures_alt_text_quality, "Figure alt text accurately describes visual content"),
     ("alt-formulas", fix_formula_text_equivalents, "Formula elements require text equivalents"),
